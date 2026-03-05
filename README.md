@@ -8,48 +8,71 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that gi
 
 ## Features
 
-**145+ tools** covering the full Unity workflow:
+**200+ tools** covering the full Unity workflow:
 
 | Category | Tools |
 |----------|-------|
 | **Unity Hub** | List/install editors, manage modules, set install paths |
-| **Scenes** | Open, save, create scenes, get full hierarchy tree |
-| **GameObjects** | Create (primitives/empty), delete, inspect, transform (world/local) |
-| **Components** | Add, remove, get/set any serialized property |
-| **Assets** | List, import, delete, create prefabs, create & assign materials |
+| **Scenes** | Open, save, create scenes, get full hierarchy tree with pagination |
+| **GameObjects** | Create (primitives/empty), delete, duplicate, reparent, activate/deactivate, transform (world/local) |
+| **Components** | Add, remove, get/set any serialized property, wire object references, batch wire |
+| **Assets** | List, import, delete, search, create prefabs, create & assign materials |
 | **Scripts** | Create, read, update C# scripts |
 | **Builds** | Multi-platform builds (Windows, macOS, Linux, Android, iOS, WebGL) |
 | **Console** | Read/clear Unity console logs (errors, warnings, info) |
 | **Play Mode** | Play, pause, stop |
-| **Editor** | Execute menu items, run C# code, get editor state |
-| **Project** | Project info, packages, render pipeline, build settings |
+| **Editor** | Execute menu items, run C# code, get editor state, undo/redo |
+| **Project** | Project info, packages (list/add/remove/search), render pipeline, build settings |
 | **Animation** | List clips & controllers, get parameters, play animations |
 | **Prefab** | Open/close prefab mode, get overrides, apply/revert changes |
 | **Physics** | Raycasts, sphere/box casts, overlap tests, physics settings |
 | **Lighting** | Manage lights, environment, skybox, lightmap baking, reflection probes |
 | **Audio** | AudioSources, AudioListeners, AudioMixers, play/stop, mixer params |
+| **Terrain** | Create/modify terrains, paint heightmaps/textures, manage terrain layers, trees, details |
+| **Navigation** | NavMesh baking, agents, obstacles, off-mesh links |
+| **Particles** | Particle system creation, inspection, module editing |
+| **UI** | Canvas, UI elements, layout groups, event system |
 | **Tags & Layers** | List/add/remove tags, assign tags & layers |
-| **Selection** | Get/set editor selection, find by name/tag/component |
+| **Selection** | Get/set editor selection, find by name/tag/component/layer/tag |
+| **Graphics** | Scene and game view capture (inline images for visual inspection) |
 | **Input Actions** | Action maps, actions, bindings (Input System package) |
 | **Assembly Defs** | List, inspect, create, update .asmdef files |
+| **ScriptableObjects** | Create, inspect, modify ScriptableObject assets |
+| **Constraints** | Position, rotation, scale, aim, parent constraints |
+| **LOD** | LOD group management and configuration |
 | **Profiler** | Start/stop profiling, stats, deep profiles, save profiler data |
 | **Frame Debugger** | Enable/disable, draw call list & details, render targets |
 | **Memory Profiler** | Memory breakdown, top consumers, snapshots (`com.unity.memoryprofiler`) |
 | **Shader Graph** | List, inspect, create, open Shader Graphs & Sub Graphs; VFX Graphs |
 | **Amplify Shader** | List, inspect, open Amplify shaders & functions (if installed) |
-| **Multi-Agent** | List active agents, get agent action logs |
+| **MPPM Scenarios** | List, activate, start, stop multiplayer playmode scenarios; get status & player info |
+| **Multi-Instance** | Discover and switch between multiple running Unity Editor instances |
+| **Multi-Agent** | List active agents, get agent action logs, queue monitoring |
+| **Project Context** | Auto-inject project-specific docs and guidelines for AI agents |
 
 ## Architecture
 
 ```
-Claude Desktop ←→ MCP Server (this repo) ←→ Unity Editor Plugin (HTTP bridge)
-                         ↕
-                   Unity Hub CLI
+Claude / AI Assistant ←→ MCP Server (this repo) ←→ Unity Editor Plugin (HTTP bridge)
+                                ↕
+                          Unity Hub CLI
 ```
 
 This server communicates with:
-- **Unity Hub** via its CLI (`--headless` mode)
+- **Unity Hub** via its CLI (supports both modern `--headless` and legacy `-- --headless` syntax)
 - **Unity Editor** via the companion [unity-mcp-plugin](https://github.com/AnkleBreaker-Studio/unity-mcp-plugin) which runs an HTTP API inside the editor
+
+### Two-Tier Tool System
+
+To avoid overwhelming MCP clients with 200+ tools, the server uses a two-tier architecture:
+- **Core tools** (~70) are always exposed directly
+- **Advanced tools** (~130+) are accessed via a single `unity_advanced_tool` proxy with lazy loading
+
+This keeps the tool count manageable for clients like Claude Desktop and Cowork while still providing access to every Unity feature. Use `unity_list_advanced_tools` to discover all advanced tools by category.
+
+### Multi-Instance Support
+
+The server automatically discovers all running Unity Editor instances on startup. If only one instance is found, it auto-connects. If multiple instances are running (e.g., main editor + ParrelSync clones), it prompts you to select which one to work with.
 
 ## Quick Start
 
@@ -97,6 +120,8 @@ Restart Claude Desktop. Done!
 - *"Profile my scene and show the top memory consumers"*
 - *"List all Shader Graphs in my project"*
 - *"Build my project for Windows"*
+- *"List and start my MPPM multiplayer scenarios"*
+- *"Capture a screenshot of my scene view"*
 - *"Show me the active agent sessions"*
 
 ## Configuration
@@ -105,8 +130,9 @@ Restart Claude Desktop. Done!
 |---------------------|---------|-------------|
 | `UNITY_HUB_PATH` | `C:\Program Files\Unity Hub\Unity Hub.exe` | Unity Hub executable path |
 | `UNITY_BRIDGE_HOST` | `127.0.0.1` | Editor bridge host |
-| `UNITY_BRIDGE_PORT` | `7890` | Editor bridge port |
+| `UNITY_BRIDGE_PORT` | `7890` | Editor bridge port (auto-discovered when using multi-instance) |
 | `UNITY_BRIDGE_TIMEOUT` | `30000` | Request timeout in ms |
+| `UNITY_MCP_DEBUG` | `false` | Enable debug logging for troubleshooting |
 
 The Unity plugin also has its own settings accessible via the Dashboard (`Window > MCP Dashboard`) for port, auto-start, and per-category feature toggles.
 
@@ -120,6 +146,7 @@ Some tools activate automatically when their packages are detected in the Unity 
 | `com.unity.shadergraph` | Shader Graph creation, inspection, opening |
 | `com.unity.visualeffectgraph` | VFX Graph listing and opening |
 | `com.unity.inputsystem` | Input Action map and binding inspection |
+| `com.unity.multiplayer.playmode` | MPPM scenario listing, activation, start/stop, player info |
 | Amplify Shader Editor (Asset Store) | Amplify shader listing, inspection, opening |
 
 Features for uninstalled packages return helpful messages explaining what to install.
