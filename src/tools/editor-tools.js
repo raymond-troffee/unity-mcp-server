@@ -2753,13 +2753,15 @@ export const editorTools = [
     handler: async (params) => {
       const result = await bridge.captureSceneViewGraphics(params);
       if (result.error) return JSON.stringify(result, null, 2);
-      if (!result.base64 || typeof result.base64 !== "string") {
+      // Bridge wraps response: { success, data: { success, base64 } }
+      const imageData = result.data?.base64 || result.base64;
+      if (!imageData || typeof imageData !== "string") {
         return JSON.stringify({ error: "Scene capture returned no image data", ...result }, null, 2);
       }
       const metadata = { ...result };
       delete metadata.base64;
-      // Validate base64 is clean (no data URI prefix)
-      const b64 = result.base64.replace(/^data:image\/\w+;base64,/, "");
+      if (metadata.data) delete metadata.data.base64;
+      const b64 = imageData.replace(/^data:image\/\w+;base64,/, "");
       return [
         { type: "image", data: b64, mimeType: "image/png" },
         { type: "text", text: JSON.stringify(metadata, null, 2) },
@@ -2791,12 +2793,15 @@ export const editorTools = [
     handler: async (params) => {
       const result = await bridge.captureGameViewGraphics(params);
       if (result.error) return JSON.stringify(result, null, 2);
-      if (!result.base64 || typeof result.base64 !== "string") {
+      // Bridge wraps response: { success, data: { success, base64 } }
+      const imageData = result.data?.base64 || result.base64;
+      if (!imageData || typeof imageData !== "string") {
         return JSON.stringify({ error: "Game capture returned no image data", ...result }, null, 2);
       }
       const metadata = { ...result };
       delete metadata.base64;
-      const b64 = result.base64.replace(/^data:image\/\w+;base64,/, "");
+      if (metadata.data) delete metadata.data.base64;
+      const b64 = imageData.replace(/^data:image\/\w+;base64,/, "");
       return [
         { type: "image", data: b64, mimeType: "image/png" },
         { type: "text", text: JSON.stringify(metadata, null, 2) },
