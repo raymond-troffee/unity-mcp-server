@@ -279,7 +279,7 @@ async function ensureInstanceDiscovery() {
 const server = new Server(
   {
     name: "unity-mcp",
-    version: "2.22.0",
+    version: "2.22.1",
   },
   {
     capabilities: {

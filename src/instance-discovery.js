@@ -60,6 +60,14 @@ export function getSelectedInstance() {
  * Detects port swapping: if ProjectA was on port 7891 but now ProjectB is there,
  * re-discovers instances and re-selects by matching projectPath.
  *
+ * Compile-time resilience:
+ *   During long Unity compilations the main thread is blocked, so the HTTP bridge
+ *   can't respond to pings. We use the instance registry file (written at startup,
+ *   persists across compiles) as a secondary signal. If a port is unresponsive but
+ *   the registry still claims our project is on that port, we keep the selection —
+ *   Unity is likely just compiling. We only clear the selection when we have positive
+ *   evidence the project is gone (not in registry AND not responding).
+ *
  * This MUST be called before the first tool execution after a process restart.
  * @returns {object|null} Validated instance, or null if validation cleared the selection.
  */
@@ -92,8 +100,29 @@ export async function validateSelectedInstance() {
         `[MCP Discovery] Port swap detected: port ${savedPort} now hosts "${info.projectName}" instead of "${saved.projectName}". Re-discovering...`
       );
     }
+    // Fall through to re-discovery (swap or info unavailable)
   } else {
-    debugLog(`Port ${savedPort} is no longer alive — re-discovering...`);
+    // Port not responding — could be compiling, could be shut down.
+    // Check the registry file as a secondary signal before assuming the worst.
+    const registryEntries = readRegistryFile();
+    const registryMatch = registryEntries.find(
+      (entry) =>
+        entry.port === savedPort &&
+        entry.projectPath &&
+        entry.projectPath === savedPath
+    );
+
+    if (registryMatch) {
+      // Registry still claims our project is on this port.
+      // Unity is very likely just compiling (main thread blocked → HTTP bridge unresponsive).
+      // Keep the selection — the bridge will respond once compilation finishes.
+      debugLog(
+        `Port ${savedPort} unresponsive but registry still lists ${saved.projectName} there — likely compiling. Keeping selection.`
+      );
+      return _selectedInstance;
+    }
+
+    debugLog(`Port ${savedPort} unresponsive and not in registry — re-discovering...`);
   }
 
   // Re-discover all instances and find the one matching our saved projectPath
@@ -111,8 +140,21 @@ export async function validateSelectedInstance() {
     return _selectedInstance;
   }
 
-  // Project no longer running — clear selection
-  debugLog(`Project "${saved.projectName}" no longer found. Clearing selection.`);
+  // Last resort: check if the registry has our project on ANY port (could be compiling on a new port)
+  const registryFallback = readRegistryFile().find(
+    (entry) => entry.projectPath && entry.projectPath === savedPath
+  );
+  if (registryFallback && registryFallback.port) {
+    debugLog(
+      `Project "${saved.projectName}" not responding but found in registry on port ${registryFallback.port} — likely compiling. Keeping selection with updated port.`
+    );
+    _selectedInstance = { ...saved, port: registryFallback.port };
+    persistState("selectedInstance", _selectedInstance);
+    return _selectedInstance;
+  }
+
+  // Project truly gone — not responding AND not in registry
+  debugLog(`Project "${saved.projectName}" no longer found (not in registry, not responding). Clearing selection.`);
   _selectedInstance = null;
   _instanceSelectionRequired = false;
   persistState("selectedInstance", null);
