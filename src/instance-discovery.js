@@ -9,24 +9,36 @@ import { readFileSync } from "fs";
 import { CONFIG } from "./config.js";
 import { debugLog } from "./state-persistence.js";
 
-// ─── Session State ───
-// Tracks which Unity instance this MCP session is targeting.
-// State is purely in-memory per-process — each agent/task gets its own MCP stdio
-// process, so in-memory state is inherently per-agent. We do NOT persist instance
-// selection to disk because multiple agents may target different Unity projects
-// simultaneously. The shared state file caused cross-agent contamination where
-// Agent A's selection would be restored by Agent B on process restart.
-// Auto-discovery handles re-selection: single instance → auto-select, multiple → prompt user.
-let _selectedInstance = null; // { port, projectName, projectPath, ... }
-let _instanceSelectionRequired = false;
+// ─── Per-Agent Session State ───
+// Tracks which Unity instance each agent is targeting.
+// State is stored in Maps keyed by agent ID because a SINGLE MCP process serves
+// ALL agents/tasks in the same Claude Desktop session. Without per-agent state,
+// Agent A selecting ProjectA would cause Agent B's commands to also route to
+// ProjectA — the classic "cross-agent contamination" bug.
+//
+// The MCP stdio transport processes requests sequentially (no concurrency),
+// so we use a "set current agent before handler" pattern: index.js calls
+// setCurrentAgent(agentId) before each tool handler, and all state functions
+// read/write from the Map entry for _currentAgentId.
+const _agentInstances = new Map();          // agentId → { port, projectName, projectPath, ... }
+const _agentSelectionRequired = new Map();  // agentId → boolean
+let _currentAgentId = "default";
 
 /**
- * Get the currently selected Unity instance for this session.
- * Returns in-memory state only — no disk persistence.
+ * Set the current agent context for subsequent state operations.
+ * Must be called before any tool handler execution.
+ * @param {string} agentId - The agent ID for the current request.
+ */
+export function setCurrentAgent(agentId) {
+  _currentAgentId = agentId || "default";
+}
+
+/**
+ * Get the currently selected Unity instance for the current agent.
  * @returns {object|null} Selected instance info, or null if none selected.
  */
 export function getSelectedInstance() {
-  return _selectedInstance;
+  return _agentInstances.get(_currentAgentId) || null;
 }
 
 /**
@@ -44,11 +56,12 @@ export function getSelectedInstance() {
  * @returns {object|null} Validated instance, or null if validation cleared the selection.
  */
 export async function validateSelectedInstance() {
-  if (!_selectedInstance) {
+  const currentInstance = _agentInstances.get(_currentAgentId);
+  if (!currentInstance) {
     return null;
   }
 
-  const saved = _selectedInstance;
+  const saved = currentInstance;
   const savedPath = saved.projectPath;
   const savedPort = saved.port;
 
@@ -57,7 +70,7 @@ export async function validateSelectedInstance() {
   if (alive) {
     const info = await getInstanceInfo(savedPort);
     if (info && info.projectPath && info.projectPath === savedPath) {
-      return _selectedInstance;
+      return currentInstance;
     }
 
     if (info && info.projectPath) {
@@ -89,7 +102,7 @@ export async function validateSelectedInstance() {
         debugLog(
           `Port ${savedPort} unresponsive but registry entry is fresh — likely compiling. Keeping selection.`
         );
-        return _selectedInstance;
+        return currentInstance;
       }
     }
 
@@ -104,9 +117,9 @@ export async function validateSelectedInstance() {
 
   if (match) {
     debugLog(`Re-selected ${saved.projectName} on new port ${match.port} (was ${savedPort})`);
-    _selectedInstance = match;
-    _instanceSelectionRequired = false;
-    return _selectedInstance;
+    _agentInstances.set(_currentAgentId, match);
+    _agentSelectionRequired.set(_currentAgentId, false);
+    return match;
   }
 
   // Last resort: check if the registry has our project on ANY port (could be compiling on a new port)
@@ -122,15 +135,16 @@ export async function validateSelectedInstance() {
       debugLog(
         `Project "${saved.projectName}" found in registry on port ${registryFallback.port} (fresh) — likely compiling. Keeping selection.`
       );
-      _selectedInstance = { ...saved, port: registryFallback.port };
-      return _selectedInstance;
+      const updated = { ...saved, port: registryFallback.port };
+      _agentInstances.set(_currentAgentId, updated);
+      return updated;
     }
   }
 
   // Project truly gone — not responding AND not in registry
-  debugLog(`Project "${saved.projectName}" no longer found. Clearing selection.`);
-  _selectedInstance = null;
-  _instanceSelectionRequired = false;
+  debugLog(`Project "${saved.projectName}" no longer found. Clearing selection for agent ${_currentAgentId}.`);
+  _agentInstances.delete(_currentAgentId);
+  _agentSelectionRequired.set(_currentAgentId, false);
   return null;
 }
 
@@ -138,14 +152,14 @@ export async function validateSelectedInstance() {
  * Check whether the session still needs the user to select an instance.
  */
 export function isInstanceSelectionRequired() {
-  return _instanceSelectionRequired;
+  return _agentSelectionRequired.get(_currentAgentId) || false;
 }
 
 /**
  * Mark that instance selection is required (multiple instances found, none selected).
  */
 export function setInstanceSelectionRequired(required) {
-  _instanceSelectionRequired = required;
+  _agentSelectionRequired.set(_currentAgentId, required);
 }
 
 /**
@@ -174,9 +188,9 @@ export async function selectInstance(port) {
     };
   }
 
-  _selectedInstance = match;
-  _instanceSelectionRequired = false;
-  debugLog(`selectInstance: selected port ${port} (${match.projectName})`);
+  _agentInstances.set(_currentAgentId, match);
+  _agentSelectionRequired.set(_currentAgentId, false);
+  debugLog(`selectInstance: agent ${_currentAgentId} selected port ${port} (${match.projectName})`);
 
   return {
     success: true,
@@ -192,8 +206,9 @@ export async function selectInstance(port) {
  */
 export function getActiveBridgeUrl() {
   const host = CONFIG.editorBridgeHost;
-  if (_selectedInstance) {
-    return `http://${host}:${_selectedInstance.port}`;
+  const selected = _agentInstances.get(_currentAgentId);
+  if (selected) {
+    return `http://${host}:${selected.port}`;
   }
   return `http://${host}:${CONFIG.editorBridgePort}`;
 }
@@ -202,8 +217,9 @@ export function getActiveBridgeUrl() {
  * Get the port of the currently selected instance, or the default.
  */
 export function getActivePort() {
-  if (_selectedInstance) {
-    return _selectedInstance.port;
+  const selected = _agentInstances.get(_currentAgentId);
+  if (selected) {
+    return selected.port;
   }
   return CONFIG.editorBridgePort;
 }
@@ -290,7 +306,7 @@ export async function autoSelectInstance() {
     const defaultAlive = await pingInstance(CONFIG.editorBridgePort);
     if (defaultAlive) {
       const info = await getInstanceInfo(CONFIG.editorBridgePort);
-      _selectedInstance = {
+      const defaultInstance = {
         port: CONFIG.editorBridgePort,
         projectName: info?.projectName || "Unity Editor",
         projectPath: info?.projectPath || "",
@@ -300,17 +316,18 @@ export async function autoSelectInstance() {
         alive: true,
         source: "default",
       };
-      _instanceSelectionRequired = false;
-      debugLog(`autoSelect: single default instance on port ${CONFIG.editorBridgePort}`);
+      _agentInstances.set(_currentAgentId, defaultInstance);
+      _agentSelectionRequired.set(_currentAgentId, false);
+      debugLog(`autoSelect: agent ${_currentAgentId} → single default instance on port ${CONFIG.editorBridgePort}`);
       return {
         autoSelected: true,
-        instance: _selectedInstance,
-        instances: [_selectedInstance],
-        message: `Auto-connected to Unity Editor: ${_selectedInstance.projectName} (port ${CONFIG.editorBridgePort})`,
+        instance: defaultInstance,
+        instances: [defaultInstance],
+        message: `Auto-connected to Unity Editor: ${defaultInstance.projectName} (port ${CONFIG.editorBridgePort})`,
       };
     }
 
-    _instanceSelectionRequired = false;
+    _agentSelectionRequired.set(_currentAgentId, false);
     return {
       autoSelected: false,
       instances: [],
@@ -320,21 +337,22 @@ export async function autoSelectInstance() {
 
   if (instances.length === 1) {
     // Exactly one instance — auto-select it
-    _selectedInstance = instances[0];
-    _instanceSelectionRequired = false;
-    debugLog(`autoSelect: single instance on port ${_selectedInstance.port}`);
+    _agentInstances.set(_currentAgentId, instances[0]);
+    _agentSelectionRequired.set(_currentAgentId, false);
+    debugLog(`autoSelect: agent ${_currentAgentId} → single instance on port ${instances[0].port}`);
     return {
       autoSelected: true,
-      instance: _selectedInstance,
+      instance: instances[0],
       instances,
-      message: `Auto-connected to Unity Editor: ${_selectedInstance.projectName} (port ${_selectedInstance.port})`,
+      message: `Auto-connected to Unity Editor: ${instances[0].projectName} (port ${instances[0].port})`,
     };
   }
 
-  // Multiple instances — require user selection (but only if none already selected manually)
-  if (!_selectedInstance) {
-    _instanceSelectionRequired = true;
-    debugLog(`autoSelect: ${instances.length} instances found, selection required`);
+  // Multiple instances — require user selection (but only if none already selected for this agent)
+  const agentSelected = _agentInstances.get(_currentAgentId);
+  if (!agentSelected) {
+    _agentSelectionRequired.set(_currentAgentId, true);
+    debugLog(`autoSelect: agent ${_currentAgentId} → ${instances.length} instances found, selection required`);
   }
   return {
     autoSelected: false,

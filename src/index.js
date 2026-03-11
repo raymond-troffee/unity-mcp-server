@@ -39,6 +39,7 @@ import {
   getSelectedInstance,
   isInstanceSelectionRequired,
   validateSelectedInstance,
+  setCurrentAgent,
 } from "./instance-discovery.js";
 import { debugLog } from "./state-persistence.js";
 import { CONFIG } from "./config.js";
@@ -117,24 +118,22 @@ console.error(
   `[MCP] Tool tiers: ${coreCount} core + ${advancedCount} advanced (via unity_advanced_tool) = ${coreCount + advancedCount} total, ${ALL_TOOLS.length} exposed`
 );
 
-// ─── Context auto-inject state ───
-// On the first tool call per session, we prepend project context into the response.
-// This ensures agents receive project knowledge without explicitly calling the context tool.
-let _contextInjected = false;
-let _contextCache = null;
+// ─── Per-Agent Session State ───
+// A SINGLE MCP process serves ALL agents/tasks in the same Claude Desktop session.
+// Without per-agent state, Agent A's context injection would prevent Agent B from
+// getting its own context, and Agent A's instance discovery would be skipped for Agent B.
+// We key state by agent ID to prevent cross-agent contamination.
 
-// ─── Instance auto-discovery state ───
-// On the very first tool call, we discover instances and auto-select if possible.
-// If multiple are found, we inject a prompt asking the user to select one.
-// State is persisted to disk because the MCP host may restart this process between tool calls.
-let _instanceDiscoveryDone = false;
+// Context auto-inject: each agent gets project context on their first tool call.
+const _contextInjectedPerAgent = new Map(); // agentId → boolean
+let _contextCache = null; // Shared cache (same project context for all agents)
 
-// No persisted state to restore — instance discovery runs fresh each process.
-// Each agent/task gets its own MCP stdio process, so in-memory state is per-agent.
+// Instance auto-discovery: each agent discovers instances on their first tool call.
+const _discoveryDonePerAgent = new Map(); // agentId → boolean
 
 async function getContextSummaryOnce() {
-  if (_contextInjected) return null;
-  _contextInjected = true;
+  if (_contextInjectedPerAgent.get(PROCESS_AGENT_ID)) return null;
+  _contextInjectedPerAgent.set(PROCESS_AGENT_ID, true);
 
   try {
     if (!_contextCache) {
@@ -177,6 +176,7 @@ async function getContextSummaryOnce() {
  * Returns a prompt string if user needs to select an instance, or null.
  */
 async function ensureInstanceDiscovery() {
+  const _instanceDiscoveryDone = _discoveryDonePerAgent.get(PROCESS_AGENT_ID) || false;
   debugLog(`ensureInstanceDiscovery: _instanceDiscoveryDone=${_instanceDiscoveryDone}, selectedPort=${getSelectedInstance()?.port || 'null'}, selectionRequired=${isInstanceSelectionRequired()}`);
 
   if (_instanceDiscoveryDone) {
@@ -190,12 +190,12 @@ async function ensureInstanceDiscovery() {
       // Validation cleared the selection (project no longer running).
       // Re-run discovery on next call.
       debugLog(`Persisted selection invalidated — project no longer found. Will re-discover.`);
-      _instanceDiscoveryDone = false;
+      _discoveryDonePerAgent.set(PROCESS_AGENT_ID, false);
     }
     return null;
   }
 
-  _instanceDiscoveryDone = true;
+  _discoveryDonePerAgent.set(PROCESS_AGENT_ID, true);
 
   try {
     const result = await autoSelectInstance();
@@ -270,7 +270,7 @@ async function ensureInstanceDiscovery() {
 const server = new Server(
   {
     name: "unity-mcp",
-    version: "2.23.1",
+    version: "2.24.0",
   },
   {
     capabilities: {
@@ -320,7 +320,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // the process-level ID which is more reliable for multi-agent scheduling.
     const meta = request.params._meta || {};
     if (meta.agentId || meta.agent_id) {
-      setAgentId(meta.agentId || meta.agent_id);
+      const overrideId = meta.agentId || meta.agent_id;
+      setAgentId(overrideId);
+      setCurrentAgent(overrideId);
+    } else {
+      // Ensure instance-discovery state targets this process's agent
+      setCurrentAgent(PROCESS_AGENT_ID);
     }
 
     // Auto-discover instances on first tool call (unless it's an instance tool itself)
@@ -332,7 +337,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // If instance selection is required and this isn't an instance/hub tool, warn
     const _selReq = isInstanceSelectionRequired();
     const _selInst = getSelectedInstance();
-    debugLog(`Tool=${name}, selectionRequired=${_selReq}, selectedPort=${_selInst?.port || 'null'}, instancePrompt=${instancePrompt ? 'SET' : 'null'}, discoveryDone=${_instanceDiscoveryDone}`);
+    debugLog(`Tool=${name}, selectionRequired=${_selReq}, selectedPort=${_selInst?.port || 'null'}, instancePrompt=${instancePrompt ? 'SET' : 'null'}, discoveryDone=${_discoveryDonePerAgent.get(PROCESS_AGENT_ID) || false}`);
     if (
       _selReq &&
       !name.startsWith("unity_hub_") &&
@@ -448,7 +453,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  debugLog(`=== SERVER START === v2.23.1, agent=${PROCESS_AGENT_ID}, discoveryDone=${_instanceDiscoveryDone}, selectedPort=${getSelectedInstance()?.port || 'null'}`);
+  debugLog(`=== SERVER START === v2.24.0, agent=${PROCESS_AGENT_ID}, discoveryDone=${_discoveryDonePerAgent.get(PROCESS_AGENT_ID) || false}, selectedPort=${getSelectedInstance()?.port || 'null'}`);
   console.error(
     `Unity MCP Server running on stdio (agent: ${PROCESS_AGENT_ID})`
   );
